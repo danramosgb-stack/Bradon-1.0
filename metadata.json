@@ -1,0 +1,6 @@
+{
+  "name": "Bradon",
+  "description": "A high-fidelity Web Player in Spotify Dark Mode style, optimized for Android smartphones, featuring responsive navigations and persistent audio streaming.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
