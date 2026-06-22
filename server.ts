@@ -497,103 +497,60 @@ app.get("/api/stream-audio", async (req, res) => {
     return res.status(400).send("Parameter videoId required");
   }
 
-  // Generate a deterministic high fidelity fallback track from 1 to 16
-  const hash = videoId.toString().split("").reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  const hash = videoId.toString().split("").reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0);
   const songNum = (hash % 16) + 1;
   const fallbackUrl = `https://www.soundhelix.com/examples/mp3/SoundHelix-Song-${songNum}.mp3`;
 
-  try {
-    const response = await fetch(`https://music.youtube.com/youtubei/v1/player?key=${API_KEY}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "X-Youtube-Client-Name": "ANDROID_MUSIC",
-        "X-Youtube-Client-Version": "4.24.5"
-      },
-      body: JSON.stringify({
-        context: {
-          client: {
-            clientName: "ANDROID_MUSIC",
-            clientVersion: "4.24.5",
-            hl: "pt_BR",
-            gl: "BR"
-          }
-        },
-        videoId: videoId
-      })
-    });
+  const INVIDIOUS_INSTANCES = [
+    "https://invidious.nerdvpn.de",
+    "https://inv.nadeko.net",
+    "https://invidious.privacyredirect.com",
+    "https://yt.cdaut.de",
+    "https://invidious.io.lol"
+  ];
 
-    if (!response.ok) {
-      throw new Error(`InnerTube player service returned status: ${response.status}`);
-    }
-
-    const data: any = await response.json();
-    const streamingData = data.streamingData || {};
-    const formats = streamingData.adaptiveFormats || streamingData.formats || [];
-
-    // Filter audio formats 
-    const audioFormats = formats.filter((f: any) => f.mimeType?.includes("audio"));
-    const bestFormat = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
-    let targetUrl = bestFormat?.url;
-
-    // Resolve cipher format if needed
-    if (!targetUrl && bestFormat?.signatureCipher) {
-      const parts = new URLSearchParams(bestFormat.signatureCipher);
-      const cipherUrl = parts.get("url") || undefined;
-      const sp = parts.get("sp") || "sig";
-      const s = parts.get("s");
-      if (cipherUrl) {
-        targetUrl = cipherUrl;
-        if (s) {
-          targetUrl += `&${sp}=${s}`;
-        }
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const apiUrl = `${instance}/api/v1/videos/${videoId}`;
+      const response = await fetch(apiUrl, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (!response.ok) continue;
+      const data: any = await response.json();
+      const formats = data.adaptiveFormats || [];
+      const audioFormats = formats.filter((f: any) => f.type?.includes("audio"));
+      const best = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (!best?.url) continue;
+      res.setHeader("Content-Type", best.type || "audio/webm");
+      res.setHeader("Cache-Control", "no-cache");
+      const streamResponse = await fetch(best.url, {
+        headers: { "Range": (req.headers.range as string) || "bytes=0-" },
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!streamResponse.ok && streamResponse.status !== 206) continue;
+      if (streamResponse.headers.get("Content-Range")) {
+        res.setHeader("Content-Range", streamResponse.headers.get("Content-Range")!);
+        res.status(206);
+      } else {
+        res.status(200);
       }
-    }
-
-    if (!targetUrl) {
-      throw new Error("No primary audio stream URL returned");
-    }
-
-    // Set core headers for browser audio stream
-    res.setHeader("Content-Type", bestFormat.mimeType || "audio/webm");
-    res.setHeader("Cache-Control", "no-cache");
-
-    // Fetch the target stream from Node server to satisfy direct IP-lock requirement
-    const streamResponse = await fetch(targetUrl, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Range": req.headers.range || "bytes=0-"
+      if (streamResponse.headers.get("Content-Length")) {
+        res.setHeader("Content-Length", streamResponse.headers.get("Content-Length")!);
       }
-    });
-
-    if (!streamResponse.ok && streamResponse.status !== 206) {
-      throw new Error(`Proxy target stream returned error: ${streamResponse.status}`);
+      const reader = streamResponse.body;
+      if (reader) {
+        Readable.from(reader as any).pipe(res);
+        return;
+      }
+    } catch (err: any) {
+      console.warn(`Invidious ${instance} falhou:`, err.message);
+      continue;
     }
-
-    // Support streaming partial range content (seeking support)
-    if (streamResponse.headers.get("Content-Range")) {
-      res.setHeader("Content-Range", streamResponse.headers.get("Content-Range")!);
-      res.status(206);
-    } else {
-      res.status(200);
-    }
-    if (streamResponse.headers.get("Content-Length")) {
-      res.setHeader("Content-Length", streamResponse.headers.get("Content-Length")!);
-    }
-
-    const reader = streamResponse.body;
-    if (reader) {
-      Readable.from(reader as any).pipe(res);
-    } else {
-      throw new Error("Readable stream body is empty");
-    }
-  } catch (err: any) {
-    console.error("Audio streaming error, redirecting to reliable fallback sample:", err.message);
-    res.redirect(fallbackUrl);
   }
+
+  console.error("Todas instancias Invidious falharam, usando fallback");
+  res.redirect(fallbackUrl);
 });
 
 // Parser for recursive InnerTube structure matching ResponseParser.kt
